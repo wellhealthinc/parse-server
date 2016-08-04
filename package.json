@@ -1,6 +1,6 @@
 {
   "name": "parse-server-transform",
-  "version": "2.2.19",
+  "version": "2.2.20",
   "description": "An express module providing a Parse-compatible API server",
   "main": "lib/index.js",
   "repository": {
@@ -36,7 +36,7 @@
     "parse": "1.9.0",
     "parse-server-fs-adapter": "1.0.0",
     "parse-server-push-adapter": "1.0.4",
-    "parse-server-s3-adapter": "git://github.com/wellhealthinc/parse-server-s3-adapter.git",
+    "parse-server-s3-adapter": "git://github.com/wellhealthinc/parse-server-s3-adapter.git#3486bf945c7679be6c01cc741bc4250adc0ec722",
     "parse-server-simple-mailgun-adapter": "1.0.0",
     "pg-promise": "5.2.7",
     "redis": "2.6.2",
