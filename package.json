@@ -1,6 +1,6 @@
 {
-  "name": "parse-server",
-  "version": "2.2.17",
+  "name": "parse-server-transform",
+  "version": "2.2.19",
   "description": "An express module providing a Parse-compatible API server",
   "main": "lib/index.js",
   "repository": {
@@ -67,7 +67,7 @@
   },
   "scripts": {
     "dev": "npm run build && node bin/dev",
-    "build": "babel src/ -d lib/",
+    "build": "./node_modules/.bin/babel src/ -d lib/",
     "pretest": "cross-env MONGODB_VERSION=${MONGODB_VERSION:=3.2.6} MONGODB_STORAGE_ENGINE=mmapv1 mongodb-runner start",
     "test": "cross-env NODE_ENV=test TESTING=1 babel-node $COVERAGE_OPTION ./node_modules/.bin/jasmine",
     "test:win": "npm run pretest && cross-env NODE_ENV=test TESTING=1 babel-node ./node_modules/.bin/istanbul cover jasmine && npm run posttest",
