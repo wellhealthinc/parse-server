@@ -76,7 +76,7 @@ const defaultColumns = Object.freeze({
     "pushTime":     {type:'String'},
     "source":       {type:'String'}, // rest or webui
     "query":        {type:'String'}, // the stringified JSON query
-    "payload":      {type:'Object'}, // the JSON payload,
+    "payload":      {type:'String'}, // the stringified JSON payload,
     "title":        {type:'String'},
     "expiry":       {type:'Number'},
     "status":       {type:'String'},
@@ -256,7 +256,15 @@ const injectDefaultSchema = ({className, fields, classLevelPermissions}) => ({
     ...fields,
   },
   classLevelPermissions,
-})
+});
+
+const VolatileClassesSchemas = volatileClasses.map((className) => {
+  return convertSchemaToAdapterSchema(injectDefaultSchema({
+    className,
+    fields: {},
+    classLevelPermissions: {}
+  }));
+});
 
 const dbTypeMatchesObjectType = (dbType, objectType) => {
   if (dbType.type !== objectType.type) return false;
@@ -268,7 +276,7 @@ const dbTypeMatchesObjectType = (dbType, objectType) => {
 
 // Stores the entire schema of the app in a weird hybrid format somewhere between
 // the mongo format and the Parse format. Soon, this will all be Parse format.
-class SchemaController {
+export default class SchemaController {
   _dbAdapter;
   data;
   perms;
@@ -900,4 +908,5 @@ export {
   systemClasses,
   defaultColumns,
   convertSchemaToAdapterSchema,
+  VolatileClassesSchemas,
 };

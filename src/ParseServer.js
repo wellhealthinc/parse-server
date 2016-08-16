@@ -2,7 +2,6 @@
 
 var batch = require('./batch'),
     bodyParser = require('body-parser'),
-    DatabaseAdapter = require('./DatabaseAdapter'),
     express = require('express'),
     middlewares = require('./middlewares'),
     multer = require('multer'),
@@ -14,8 +13,8 @@ if (!global._babelPolyfill) {
   require('babel-polyfill');
 }
 
-import { logger,
-      configureLogger }         from './logger';
+import defaults                 from './defaults';
+import * as logging             from './logger';
 import AppCache                 from './cache';
 import Config                   from './Config';
 import parseServerPackage       from '../package.json';
@@ -28,7 +27,7 @@ import { InMemoryCacheAdapter } from './Adapters/Cache/InMemoryCacheAdapter';
 import { AnalyticsController }  from './Controllers/AnalyticsController';
 import { CacheController }      from './Controllers/CacheController';
 import { AnalyticsAdapter }     from './Adapters/Analytics/AnalyticsAdapter';
-import { FileLoggerAdapter }    from './Adapters/Logger/FileLoggerAdapter';
+import { WinstonLoggerAdapter } from './Adapters/Logger/WinstonLoggerAdapter';
 import { FilesController }      from './Controllers/FilesController';
 import { FilesRouter }          from './Routers/FilesRouter';
 import { FunctionsRouter }      from './Routers/FunctionsRouter';
@@ -56,22 +55,17 @@ import { PurgeRouter }          from './Routers/PurgeRouter';
 
 import DatabaseController       from './Controllers/DatabaseController';
 import SchemaCache              from './Controllers/SchemaCache';
-const SchemaController = require('./Controllers/SchemaController');
 import ParsePushAdapter         from 'parse-server-push-adapter';
 import MongoStorageAdapter      from './Adapters/Storage/Mongo/MongoStorageAdapter';
 // Mutate the Parse object to add the Cloud Code handlers
 addParseCloud();
-
-
-const requiredUserFields = { fields: { ...SchemaController.defaultColumns._Default, ...SchemaController.defaultColumns._User } };
-
 
 // ParseServer works like a constructor of an express app.
 // The args that we understand are:
 // "analyticsAdapter": an adapter class for analytics
 // "filesAdapter": a class like GridStoreAdapter providing create, get,
 //                 and delete
-// "loggerAdapter": a class like FileLoggerAdapter providing info, error,
+// "loggerAdapter": a class like WinstonLoggerAdapter providing info, error,
 //                 and query
 // "jsonLogs": log as structured JSON objects
 // "databaseURI": a uri like mongodb://localhost:27017/dbname to tell us
@@ -100,13 +94,16 @@ class ParseServer {
     appId = requiredParameter('You must provide an appId!'),
     masterKey = requiredParameter('You must provide a masterKey!'),
     appName,
-    analyticsAdapter = undefined,
+    analyticsAdapter,
     filesAdapter,
     push,
     loggerAdapter,
-    jsonLogs,
-    logsFolder,
-    databaseURI,
+    jsonLogs = defaults.jsonLogs,
+    logsFolder = defaults.logsFolder,
+    verbose = defaults.verbose,
+    logLevel = defaults.level,
+    silent = defaults.silent,
+    databaseURI = defaults.DefaultMongoURI,
     databaseOptions,
     databaseAdapter,
     cloud,
@@ -116,15 +113,15 @@ class ParseServer {
     dotNetKey,
     restAPIKey,
     webhookKey,
-    fileKey = undefined,
+    fileKey,
     facebookAppIds = [],
-    enableAnonymousUsers = true,
-    allowClientClassCreation = true,
+    enableAnonymousUsers = defaults.enableAnonymousUsers,
+    allowClientClassCreation = defaults.allowClientClassCreation,
     oauth = {},
     serverURL = requiredParameter('You must provide a serverURL!'),
-    maxUploadSize = '20mb',
-    verifyUserEmails = false,
-    preventLoginWithUnverifiedEmail = false,
+    maxUploadSize = defaults.maxUploadSize,
+    verifyUserEmails = defaults.verifyUserEmails,
+    preventLoginWithUnverifiedEmail = defaults.preventLoginWithUnverifiedEmail,
     emailVerifyTokenValidityDuration,
     cacheAdapter,
     emailAdapter,
@@ -136,17 +133,16 @@ class ParseServer {
       passwordResetSuccess: undefined
     },
     liveQuery = {},
-    sessionLength = 31536000, // 1 Year in seconds
-    expireInactiveSessions = true,
-    verbose = false,
-    revokeSessionOnPasswordReset = true,
-    schemaCacheTTL = 5, // cache for 5s
+    sessionLength = defaults.sessionLength, // 1 Year in seconds
+    expireInactiveSessions = defaults.expireInactiveSessions,
+    revokeSessionOnPasswordReset = defaults.revokeSessionOnPasswordReset,
+    schemaCacheTTL = defaults.schemaCacheTTL, // cache for 5s
     __indexBuildCompletionCallbackForTests = () => {},
   }) {
     // Initialize the node client SDK automatically
     Parse.initialize(appId, javascriptKey || 'unused', masterKey);
     Parse.serverURL = serverURL;
-    if ((databaseOptions || databaseURI || collectionPrefix !== '') && databaseAdapter) {
+    if ((databaseOptions || (databaseURI && databaseURI != defaults.DefaultMongoURI) || collectionPrefix !== '') && databaseAdapter) {
       throw 'You cannot specify both a databaseAdapter and a databaseURI/databaseOptions/connectionPrefix.';
     } else if (!databaseAdapter) {
       databaseAdapter = new MongoStorageAdapter({
@@ -162,65 +158,35 @@ class ParseServer {
       throw 'When using an explicit database adapter, you must also use and explicit filesAdapter.';
     }
 
-    if (logsFolder) {
-      configureLogger({logsFolder, jsonLogs});
-    }
-
-    if (cloud) {
-      addParseCloud();
-      if (typeof cloud === 'function') {
-        cloud(Parse)
-      } else if (typeof cloud === 'string') {
-        require(path.resolve(process.cwd(), cloud));
-      } else {
-        throw "argument 'cloud' must either be a string or a function";
-      }
-    }
-
-    if (verbose || process.env.VERBOSE || process.env.VERBOSE_PARSE_SERVER) {
-      configureLogger({level: 'silly', jsonLogs});
-    }
+    const loggerControllerAdapter = loadAdapter(loggerAdapter, WinstonLoggerAdapter, { jsonLogs, logsFolder, verbose, logLevel, silent });
+    const loggerController = new LoggerController(loggerControllerAdapter, appId);
+    logging.setLogger(loggerController);
 
     const filesControllerAdapter = loadAdapter(filesAdapter, () => {
       return new GridStoreAdapter(databaseURI);
     });
+    const filesController = new FilesController(filesControllerAdapter, appId);
+
     // Pass the push options too as it works with the default
     const pushControllerAdapter = loadAdapter(push && push.adapter, ParsePushAdapter, push || {});
-    const loggerControllerAdapter = loadAdapter(loggerAdapter, FileLoggerAdapter);
-    const emailControllerAdapter = loadAdapter(emailAdapter);
-    const cacheControllerAdapter = loadAdapter(cacheAdapter, InMemoryCacheAdapter, {appId: appId});
-    const analyticsControllerAdapter = loadAdapter(analyticsAdapter, AnalyticsAdapter);
-
     // We pass the options and the base class for the adatper,
     // Note that passing an instance would work too
-    const filesController = new FilesController(filesControllerAdapter, appId);
     const pushController = new PushController(pushControllerAdapter, appId, push);
-    const loggerController = new LoggerController(loggerControllerAdapter, appId);
+
+    const emailControllerAdapter = loadAdapter(emailAdapter);
     const userController = new UserController(emailControllerAdapter, appId, { verifyUserEmails });
-    const liveQueryController = new LiveQueryController(liveQuery);
+
+    const cacheControllerAdapter = loadAdapter(cacheAdapter, InMemoryCacheAdapter, {appId: appId});
     const cacheController = new CacheController(cacheControllerAdapter, appId);
-    const databaseController = new DatabaseController(databaseAdapter, new SchemaCache(cacheController, schemaCacheTTL));
-    const hooksController = new HooksController(appId, databaseController, webhookKey);
+
+    const analyticsControllerAdapter = loadAdapter(analyticsAdapter, AnalyticsAdapter);
     const analyticsController = new AnalyticsController(analyticsControllerAdapter);
 
-    // TODO: create indexes on first creation of a _User object. Otherwise it's impossible to
-    // have a Parse app without it having a _User collection.
-    let userClassPromise = databaseController.loadSchema()
-    .then(schema => schema.enforceClassExists('_User'))
+    const liveQueryController = new LiveQueryController(liveQuery);
+    const databaseController = new DatabaseController(databaseAdapter, new SchemaCache(cacheController, schemaCacheTTL));
+    const hooksController = new HooksController(appId, databaseController, webhookKey);
 
-    let usernameUniqueness = userClassPromise
-    .then(() => databaseController.adapter.ensureUniqueness('_User', requiredUserFields, ['username']))
-    .catch(error => {
-      logger.warn('Unable to ensure uniqueness for usernames: ', error);
-      return Promise.reject(error);
-    });
-
-    let emailUniqueness = userClassPromise
-    .then(() => databaseController.adapter.ensureUniqueness('_User', requiredUserFields, ['email']))
-    .catch(error => {
-      logger.warn('Unable to ensure uniqueness for user email addresses: ', error);
-      return Promise.reject(error);
-    })
+    const dbInitPromise = databaseController.performInitizalization();
 
     AppCache.put(appId, {
       appId,
@@ -270,7 +236,18 @@ class ParseServer {
 
     // Note: Tests will start to fail if any validation happens after this is called.
     if (process.env.TESTING) {
-      __indexBuildCompletionCallbackForTests(Promise.all([usernameUniqueness, emailUniqueness]));
+      __indexBuildCompletionCallbackForTests(dbInitPromise);
+    }
+
+    if (cloud) {
+      addParseCloud();
+      if (typeof cloud === 'function') {
+        cloud(Parse)
+      } else if (typeof cloud === 'string') {
+        require(path.resolve(process.cwd(), cloud));
+      } else {
+        throw "argument 'cloud' must either be a string or a function";
+      }
     }
   }
 
@@ -284,21 +261,14 @@ class ParseServer {
     var api = express();
     //api.use("/apps", express.static(__dirname + "/public"));
     // File handling needs to be before default middlewares are applied
-    api.use('/', middlewares.allowCrossDomain, new FilesRouter().getExpressRouter({
+    api.use('/', middlewares.allowCrossDomain, new FilesRouter().expressRouter({
       maxUploadSize: maxUploadSize
     }));
 
-    api.use('/', bodyParser.urlencoded({extended: false}), new PublicAPIRouter().expressApp());
-
-    // TODO: separate this from the regular ParseServer object
-    if (process.env.TESTING == 1) {
-      api.use('/', require('./testing-routes').router);
-    }
+    api.use('/', bodyParser.urlencoded({extended: false}), new PublicAPIRouter().expressRouter());
 
     api.use(bodyParser.json({ 'type': '*/*' , limit: maxUploadSize }));
-    api.use(middlewares.allowCrossDomain);
     api.use(middlewares.allowMethodOverride);
-    api.use(middlewares.handleParseHeaders);
 
     let routers = [
       new ClassesRouter(),
@@ -315,21 +285,20 @@ class ParseServer {
       new FeaturesRouter(),
       new GlobalConfigRouter(),
       new PurgeRouter(),
+      new HooksRouter()
     ];
-
-    if (process.env.PARSE_EXPERIMENTAL_HOOKS_ENABLED || process.env.TESTING) {
-      routers.push(new HooksRouter());
-    }
 
     let routes = routers.reduce((memo, router) => {
       return memo.concat(router.routes);
     }, []);
 
     let appRouter = new PromiseRouter(routes, appId);
-
+    appRouter.use(middlewares.allowCrossDomain);
+    appRouter.use(middlewares.handleParseHeaders);
+    
     batch.mountOnto(appRouter);
 
-    api.use(appRouter.expressApp());
+    api.use(appRouter.expressRouter());
 
     api.use(middlewares.handleParseErrors);
 

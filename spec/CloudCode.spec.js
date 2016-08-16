@@ -684,7 +684,45 @@ describe('Cloud Code', () => {
     });
   });
 
-  it_exclude_dbs(['postgres'])('should fully delete objects when using `unset` with beforeSave (regression test for #1840)', done => {
+it('beforeSave should not affect fetched pointers', done => {
+    Parse.Cloud.beforeSave('BeforeSaveUnchanged', (req, res) => {
+      res.success();
+    });
+
+    Parse.Cloud.beforeSave('BeforeSaveChanged', function(req, res) {
+      req.object.set('foo', 'baz');
+      res.success();
+    });
+
+    var TestObject =  Parse.Object.extend("TestObject");
+    var BeforeSaveUnchangedObject = Parse.Object.extend("BeforeSaveUnchanged");
+    var BeforeSaveChangedObject = Parse.Object.extend("BeforeSaveChanged");
+
+    var aTestObject = new TestObject();
+    aTestObject.set("foo", "bar");
+    aTestObject.save()
+    .then(aTestObject => {
+      var aBeforeSaveUnchangedObject = new BeforeSaveUnchangedObject();
+      aBeforeSaveUnchangedObject.set("aTestObject", aTestObject);
+      expect(aBeforeSaveUnchangedObject.get("aTestObject").get("foo")).toEqual("bar");
+      return aBeforeSaveUnchangedObject.save();
+    })
+    .then(aBeforeSaveUnchangedObject => {
+      expect(aBeforeSaveUnchangedObject.get("aTestObject").get("foo")).toEqual("bar");
+
+      var aBeforeSaveChangedObject = new BeforeSaveChangedObject();
+      aBeforeSaveChangedObject.set("aTestObject", aTestObject);
+      expect(aBeforeSaveChangedObject.get("aTestObject").get("foo")).toEqual("bar");
+      return aBeforeSaveChangedObject.save();
+    })
+    .then(aBeforeSaveChangedObject => {
+      expect(aBeforeSaveChangedObject.get("aTestObject").get("foo")).toEqual("bar");
+      expect(aBeforeSaveChangedObject.get("foo")).toEqual("baz");
+      done();
+    });
+  });
+
+  it('should fully delete objects when using `unset` with beforeSave (regression test for #1840)', done => {
     var TestObject = Parse.Object.extend('TestObject');
     var NoBeforeSaveObject = Parse.Object.extend('NoBeforeSave');
     var BeforeSaveObject = Parse.Object.extend('BeforeSaveChanged');
@@ -708,7 +746,7 @@ describe('Cloud Code', () => {
       })
       .then(object => {
         res.success(object);
-      });
+      }).catch(res.error);
     });
 
     Parse.Cloud.define('removeme2', (req, res) => {
@@ -724,7 +762,7 @@ describe('Cloud Code', () => {
       })
       .then(object => {
         res.success(object);
-      });
+      }).catch(res.error);
     });
 
     Parse.Cloud.run('removeme')
@@ -737,10 +775,13 @@ describe('Cloud Code', () => {
       expect(aBeforeSaveObj.get('before')).toEqual('save');
       expect(aBeforeSaveObj.get('remove')).toEqual(undefined);
       done();
+    }).catch((err) => {
+      jfail(err);
+      done();
     });
   });
 
-  it_exclude_dbs(['postgres'])('should fully delete objects when using `unset` with beforeSave (regression test for #1840)', done => {
+  it('should fully delete objects when using `unset` with beforeSave (regression test for #1840)', done => {
     var TestObject = Parse.Object.extend('TestObject');
     var BeforeSaveObject = Parse.Object.extend('BeforeSaveChanged');
 
@@ -764,12 +805,12 @@ describe('Cloud Code', () => {
        expect(object.get('remove')).toBeUndefined();
        done();
     }).fail((err) => {
-      console.error(err);
+      jfail(err);
       done();
-    })
+    });
   });
 
-  it_exclude_dbs(['postgres'])('should not include relation op (regression test for #1606)', done => {
+  it('should not include relation op (regression test for #1606)', done => {
     var TestObject = Parse.Object.extend('TestObject');
     var BeforeSaveObject = Parse.Object.extend('BeforeSaveChanged');
     let testObj;
@@ -780,7 +821,7 @@ describe('Cloud Code', () => {
       testObj.save().then(() => {
         object.relation('testsRelation').add(testObj);
         res.success();
-      })
+      }, res.error);
     });
 
     let object = new BeforeSaveObject();
@@ -789,7 +830,7 @@ describe('Cloud Code', () => {
       expect(() => { objectAgain.relation('testsRelation') }).not.toThrow();
       done();
     }).fail((err) => {
-      console.error(err);
+      jfail(err);
       done();
     })
   });

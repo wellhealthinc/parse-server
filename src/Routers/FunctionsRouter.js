@@ -65,8 +65,9 @@ export class FunctionsRouter extends PromiseRouter {
         master: req.auth && req.auth.isMaster,
         user: req.auth && req.auth.user,
         installationId: req.info.installationId,
-        log: req.config.loggerController && req.config.loggerController.adapter,
-        headers: req.headers
+        log: req.config.loggerController,
+        headers: req.headers,
+        functionName: req.params.functionName
       };
 
       if (theValidator && typeof theValidator === "function") {
@@ -81,7 +82,7 @@ export class FunctionsRouter extends PromiseRouter {
           logger.info(`Ran cloud function ${req.params.functionName} with:\nInput: ${JSON.stringify(params)}\nResult: ${JSON.stringify(result.response.result)}`, {
             functionName: req.params.functionName,
             params,
-            result: result.response.resut
+            result: result.response.result
           });
           resolve(result);
         }, (error) => {
