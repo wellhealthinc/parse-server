@@ -164,7 +164,7 @@ describe('Parse.Relation testing', () => {
   });
 
 
-  it("queries with relations", (done) => {
+  it_exclude_dbs(['postgres'])("queries with relations", (done) => {
 
     var ChildObject = Parse.Object.extend("ChildObject");
     var childObjects = [];
@@ -331,6 +331,9 @@ describe('Parse.Relation testing', () => {
             done();
           });
         });
+    }).catch(err => {
+      jfail(err);
+      done();
     });
   });
 

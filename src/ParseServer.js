@@ -45,6 +45,7 @@ import { ParseLiveQueryServer } from './LiveQuery/ParseLiveQueryServer';
 import { PublicAPIRouter }      from './Routers/PublicAPIRouter';
 import { PushController }       from './Controllers/PushController';
 import { PushRouter }           from './Routers/PushRouter';
+import { CloudCodeRouter }      from './Routers/CloudCodeRouter';
 import { randomString }         from './cryptoUtils';
 import { RolesRouter }          from './Routers/RolesRouter';
 import { SchemasRouter }        from './Routers/SchemasRouter';
@@ -123,6 +124,7 @@ class ParseServer {
     verifyUserEmails = defaults.verifyUserEmails,
     preventLoginWithUnverifiedEmail = defaults.preventLoginWithUnverifiedEmail,
     emailVerifyTokenValidityDuration,
+    accountLockout,
     cacheAdapter,
     emailAdapter,
     publicServerURL,
@@ -143,7 +145,7 @@ class ParseServer {
     Parse.initialize(appId, javascriptKey || 'unused', masterKey);
     Parse.serverURL = serverURL;
     if ((databaseOptions || (databaseURI && databaseURI != defaults.DefaultMongoURI) || collectionPrefix !== '') && databaseAdapter) {
-      throw 'You cannot specify both a databaseAdapter and a databaseURI/databaseOptions/connectionPrefix.';
+      throw 'You cannot specify both a databaseAdapter and a databaseURI/databaseOptions/collectionPrefix.';
     } else if (!databaseAdapter) {
       databaseAdapter = new MongoStorageAdapter({
         uri: databaseURI,
@@ -210,6 +212,7 @@ class ParseServer {
       verifyUserEmails: verifyUserEmails,
       preventLoginWithUnverifiedEmail: preventLoginWithUnverifiedEmail,
       emailVerifyTokenValidityDuration: emailVerifyTokenValidityDuration,
+      accountLockout: accountLockout,
       allowClientClassCreation: allowClientClassCreation,
       authDataManager: authDataManager(oauth, enableAnonymousUsers),
       appName: appName,
@@ -285,7 +288,8 @@ class ParseServer {
       new FeaturesRouter(),
       new GlobalConfigRouter(),
       new PurgeRouter(),
-      new HooksRouter()
+      new HooksRouter(),
+      new CloudCodeRouter()
     ];
 
     let routes = routers.reduce((memo, router) => {
@@ -295,7 +299,7 @@ class ParseServer {
     let appRouter = new PromiseRouter(routes, appId);
     appRouter.use(middlewares.allowCrossDomain);
     appRouter.use(middlewares.handleParseHeaders);
-    
+
     batch.mountOnto(appRouter);
 
     api.use(appRouter.expressRouter());

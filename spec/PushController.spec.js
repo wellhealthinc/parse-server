@@ -1,6 +1,6 @@
 "use strict";
 var PushController = require('../src/Controllers/PushController').PushController;
-var pushStatusHandler = require('../src/pushStatusHandler');
+var StatusHandler = require('../src/StatusHandler');
 var Config = require('../src/Config');
 
 const successfulTransmissions = function(body, installations) {
@@ -357,7 +357,7 @@ describe('PushController', () => {
    })
   });
 
-  it_exclude_dbs(['postgres'])('should support full RESTQuery for increment', (done) => {
+  it('should support full RESTQuery for increment', (done) => {
     var payload = {data: {
      alert: "Hello World!",
      badge: 'Increment',
@@ -392,7 +392,7 @@ describe('PushController', () => {
    pushController.sendPush(payload, where, config, auth).then((result) => {
       done();
     }).catch((err) => {
-      fail('should not fail');
+      jfail(err);
       done();
     });
   });
@@ -439,7 +439,7 @@ describe('PushController', () => {
   });
 
   it('should flatten', () => {
-    var res = pushStatusHandler.flatten([1, [2], [[3, 4], 5], [[[6]]]])
+    var res = StatusHandler.flatten([1, [2], [[3, 4], 5], [[[6]]]])
     expect(res).toEqual([1,2,3,4,5,6]);
   })
 });

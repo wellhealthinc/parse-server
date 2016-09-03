@@ -18,7 +18,7 @@ const parseTypeToPostgresType = type => {
     case 'String': return 'text';
     case 'Date': return 'timestamp with time zone';
     case 'Object': return 'jsonb';
-    case 'File': return 'jsonb';
+    case 'File': return 'text';
     case 'Boolean': return 'boolean';
     case 'Pointer': return 'char(10)';
     case 'Number': return 'double precision';
@@ -45,12 +45,15 @@ const toPostgresValue = value => {
     if (value.__type === 'Date') {
       return value.iso;
     }
+    if (value.__type === 'File') {
+      return value.name;
+    }
   }
   return value;
 }
 
 const transformValue = value => {
-  if (value.__type == 'Pointer') {
+  if (value.__type === 'Pointer') {
     return value.objectId;
   }
   return value;
@@ -107,6 +110,44 @@ const toPostgresSchema = (schema) => {
   return schema;
 }
 
+const handleDotFields = (object) => {
+  Object.keys(object).forEach(fieldName => {
+    if (fieldName.indexOf('.') > -1) {
+      let components = fieldName.split('.');
+      let first = components.shift();
+      object[first] = object[first] || {};
+      let currentObj = object[first];
+      let next;
+      let value = object[fieldName];
+      if (value && value.__op === 'Delete') {
+        value = undefined;
+      }
+      while(next = components.shift()) {
+        currentObj[next] = currentObj[next] || {};
+        if (components.length === 0) {
+          currentObj[next] = value;
+        }
+        currentObj = currentObj[next];
+      }
+      delete object[fieldName];
+    }
+  });
+  return object;
+}
+
+// Returns the list of join tables on a schema
+const joinTablesForSchema = (schema) => {
+  let list = [];
+  if (schema) {
+    Object.keys(schema.fields).forEach((field) => {
+      if (schema.fields[field].type === 'Relation') {
+        list.push(`_Join:${field}:${schema.className}`);
+      }
+    });
+  }
+  return list;
+} 
+
 const buildWhereClause = ({ schema, query, index }) => {
   let patterns = [];
   let values = [];
@@ -114,11 +155,23 @@ const buildWhereClause = ({ schema, query, index }) => {
 
   schema = toPostgresSchema(schema);
   for (let fieldName in query) {
+    let isArrayField = schema.fields 
+          && schema.fields[fieldName] 
+          && schema.fields[fieldName].type === 'Array';
     let initialPatternsLength = patterns.length;
     let fieldValue = query[fieldName];
+
+    // nothingin the schema, it's gonna blow up
+    if (!schema.fields[fieldName]) {
+      // as it won't exist
+      if (fieldValue.$exists === false) {
+        continue;
+      }
+    } 
+
     if (fieldName.indexOf('.') >= 0) {
       let components = fieldName.split('.').map((cmpt, index) => {
-        if (index == 0) {
+        if (index === 0) {
           return `"${cmpt}"`;
         }
         return `'${cmpt}'`; 
@@ -138,25 +191,33 @@ const buildWhereClause = ({ schema, query, index }) => {
       patterns.push(`$${index}:name = $${index + 1}`);
       values.push(fieldName, fieldValue);
       index += 2;
-    } else if (fieldName === '$or') {
+    } else if (fieldName === '$or' || fieldName === '$and') {
       let clauses = [];
       let clauseValues = [];
       fieldValue.forEach((subQuery, idx) =>  {
         let clause = buildWhereClause({ schema, query: subQuery, index });
-        clauses.push(clause.pattern);
-        clauseValues.push(...clause.values);
-        index += clause.values.length;
+        if (clause.pattern.length > 0) {
+          clauses.push(clause.pattern);
+          clauseValues.push(...clause.values);
+          index += clause.values.length;
+        }
       });
-      patterns.push(`(${clauses.join(' OR ')})`);
+      let orOrAnd = fieldName === '$or' ? ' OR ' : ' AND ';
+      patterns.push(`(${clauses.join(orOrAnd)})`);
       values.push(...clauseValues);
     }
 
     if (fieldValue.$ne) {
-      if (fieldValue.$ne === null) {
-        patterns.push(`$${index}:name <> $${index + 1}`);
+      if (isArrayField) {
+        fieldValue.$ne = JSON.stringify([fieldValue.$ne]);
+        patterns.push(`NOT array_contains($${index}:name, $${index + 1})`);
       } else {
-        // if not null, we need to manually exclude null
-        patterns.push(`($${index}:name <> $${index + 1} OR $${index}:name IS NULL)`);
+        if (fieldValue.$ne === null) {
+          patterns.push(`$${index}:name <> $${index + 1}`);
+        } else {
+          // if not null, we need to manually exclude null
+          patterns.push(`($${index}:name <> $${index + 1} OR $${index}:name IS NULL)`);
+        }
       }
 
       // TODO: support arrays
@@ -170,7 +231,10 @@ const buildWhereClause = ({ schema, query, index }) => {
       index += 2;
     }
     const isInOrNin = Array.isArray(fieldValue.$in) || Array.isArray(fieldValue.$nin);
-    if (Array.isArray(fieldValue.$in) && schema.fields[fieldName].type === 'Array') {
+    if (Array.isArray(fieldValue.$in) &&
+        isArrayField &&
+        schema.fields[fieldName].contents && 
+        schema.fields[fieldName].contents.type === 'String') {
       let inPatterns = [];
       let allowNull = false;
       values.push(fieldName);
@@ -191,15 +255,21 @@ const buildWhereClause = ({ schema, query, index }) => {
     } else if (isInOrNin) {
       var createConstraint = (baseArray, notIn) => {
         if (baseArray.length > 0) {
-          let inPatterns = [];
-          values.push(fieldName);
-          baseArray.forEach((listElem, listIndex) => {
-            values.push(listElem);
-            inPatterns.push(`$${index + 1 + listIndex}`);
-          });
-          let not = notIn ? 'NOT' : '';
-          patterns.push(`$${index}:name ${not} IN (${inPatterns.join(',')})`);
-          index = index + 1 + inPatterns.length;
+          let not = notIn ? ' NOT ' : '';
+          if (isArrayField) {
+            patterns.push(`${not} array_contains($${index}:name, $${index+1})`);
+            values.push(fieldName, JSON.stringify(baseArray));
+            index += 2;
+          } else {
+            let inPatterns = [];
+            values.push(fieldName);
+            baseArray.forEach((listElem, listIndex) => {
+              values.push(listElem);
+              inPatterns.push(`$${index + 1 + listIndex}`);
+            });
+            patterns.push(`$${index}:name ${not} IN (${inPatterns.join(',')})`);
+            index = index + 1 + inPatterns.length;
+          }
         } else if (!notIn) {
           values.push(fieldName);
           patterns.push(`$${index}:name IS NULL`);
@@ -212,6 +282,12 @@ const buildWhereClause = ({ schema, query, index }) => {
       if (fieldValue.$nin) {
         createConstraint(fieldValue.$nin, true);
       }
+    }
+
+    if (Array.isArray(fieldValue.$all) && isArrayField) {
+      patterns.push(`array_contains_all($${index}:name, $${index+1}::jsonb)`);
+      values.push(fieldName, JSON.stringify(fieldValue.$all));
+      index+=2;
     }
 
     if (typeof fieldValue.$exists !== 'undefined') {
@@ -230,8 +306,20 @@ const buildWhereClause = ({ schema, query, index }) => {
       let distanceInKM = distance*6371*1000;
       patterns.push(`ST_distance_sphere($${index}:name::geometry, POINT($${index+1}, $${index+2})::geometry) <= $${index+3}`);
       sorts.push(`ST_distance_sphere($${index}:name::geometry, POINT($${index+1}, $${index+2})::geometry) ASC`)
-      values.push(fieldName, point.latitude, point.longitude, distanceInKM);
+      values.push(fieldName, point.longitude, point.latitude, distanceInKM);
       index += 4;
+    }
+
+    if (fieldValue.$within && fieldValue.$within.$box) {
+      let box = fieldValue.$within.$box;
+      let left = box[0].longitude;
+      let bottom = box[0].latitude;
+      let right = box[1].longitude;
+      let top = box[1].latitude;
+
+      patterns.push(`$${index}:name::point <@ $${index+1}::box`);
+      values.push(fieldName, `((${left}, ${bottom}), (${right}, ${top}))`);
+      index += 2;
     }
 
     if (fieldValue.$regex) {
@@ -249,9 +337,15 @@ const buildWhereClause = ({ schema, query, index }) => {
     }
 
     if (fieldValue.__type === 'Pointer') {
-      patterns.push(`$${index}:name = $${index + 1}`);
-      values.push(fieldName, fieldValue.objectId);
-      index += 2;
+      if (isArrayField) {
+        patterns.push(`array_contains($${index}:name, $${index + 1})`);
+        values.push(fieldName, JSON.stringify([fieldValue]));
+        index += 2;
+      } else {
+        patterns.push(`$${index}:name = $${index + 1}`);
+        values.push(fieldName, fieldValue.objectId);
+        index += 2;
+      }
     }
 
     if (fieldValue.__type === 'Date') {
@@ -302,25 +396,30 @@ export class PostgresStorageAdapter {
   };
 
   classExists(name) {
-    return notImplemented();
+    return this._client.one(`SELECT EXISTS (SELECT 1 FROM   information_schema.tables WHERE table_name = $1)`, [name]).then((res) => {
+      return res.exists;
+    });
   }
 
   setClassLevelPermissions(className, CLPs) {
     return this._ensureSchemaCollectionExists().then(() => {
-      const values = [className, 'schema', 'classLevelPermissions', CLPs]
+      const values = [className, 'schema', 'classLevelPermissions', JSON.stringify(CLPs)]
       return this._client.none(`UPDATE "_SCHEMA" SET $2:name = json_object_set_key($2:name, $3::text, $4::jsonb) WHERE "className"=$1 `, values);
-    }).catch((err) => {
-      console.error("ERR!!!", err);
-      return Promise.reject(err);
-    })
+    });
   }
 
   createClass(className, schema) {
     return this.createTable(className, schema)
     .then(() => this._client.none('INSERT INTO "_SCHEMA" ("className", "schema", "isParseClass") VALUES ($<className>, $<schema>, true)', { className, schema }))
-    .then(() => { 
+    .then(() => {
       return toParseSchema(schema)
-    });
+    })
+    .catch((err) => {
+      if (err.code === PostgresUniqueIndexViolationError && err.detail.includes(className)) {
+        throw new Parse.Error(Parse.Error.INVALID_CLASS_NAME, `Class ${className} already exists.`)
+      }
+      throw err;
+    })
   }
 
   // Just create a table, do not insert in schema
@@ -332,6 +431,9 @@ export class PostgresStorageAdapter {
     if (className === '_User') {
       fields._email_verify_token_expires_at = {type: 'Date'};
       fields._email_verify_token = {type: 'String'};
+      fields._account_lockout_expires_at = {type: 'Date'};
+      fields._failed_login_count = {type: 'Number'};
+      fields._perishable_token = {type: 'String'};
     }
     let index = 2;
     let relations = [];
@@ -339,7 +441,7 @@ export class PostgresStorageAdapter {
       let parseType = fields[fieldName];
       // Skip when it's a relation
       // We'll create the tables later
-      if (parseType.type == 'Relation') {
+      if (parseType.type === 'Relation') {
         relations.push(fieldName)
         return;
       }
@@ -349,9 +451,12 @@ export class PostgresStorageAdapter {
       valuesArray.push(fieldName);
       valuesArray.push(parseTypeToPostgresType(parseType));
       patternsArray.push(`$${index}:name $${index+1}:raw`);
+      if (fieldName === 'objectId') {
+        patternsArray.push(`PRIMARY KEY ($${index}:name)`)
+      }
       index = index+2;
     });
-    const qs = `CREATE TABLE $1:name (${patternsArray.join(',')}, PRIMARY KEY ("objectId"))`;
+    const qs = `CREATE TABLE $1:name (${patternsArray.join(',')})`;
     const values = [className, ...valuesArray];
     return this._ensureSchemaCollectionExists()
     .then(() => this._client.none(qs, values))
@@ -364,7 +469,7 @@ export class PostgresStorageAdapter {
     }).then(() => {
       // Create the relation tables
       return Promise.all(relations.map((fieldName) => {
-        return this._client.none('CREATE TABLE IF NOT EXISTS $<joinTable:name> ("relatedId" varChar(120), "owningId" varChar(120), PRIMARY KEY("relatedId", "owningId") )', {joinTable: `_Join:${fieldName}:${className}`})
+        return this._client.none('CREATE TABLE IF NOT EXISTS $<joinTable:name> ("relatedId" varChar(120), "owningId" varChar(120), PRIMARY KEY("relatedId", "owningId") )', {joinTable: `_Join:${fieldName}:${className}`});
       }));
     });
   }
@@ -396,7 +501,7 @@ export class PostgresStorageAdapter {
       return promise.then(() => {
         return t.any('SELECT "schema" FROM "_SCHEMA" WHERE "className" = $<className>', {className});
       }).then(result => {
-        if (fieldName in result[0].schema) {
+        if (fieldName in result[0].schema.fields) {
           throw "Attempted to add a field that already exists";
         } else {
           result[0].schema.fields[fieldName] = type;
@@ -412,7 +517,14 @@ export class PostgresStorageAdapter {
   // Drops a collection. Resolves with true if it was a Parse Schema (eg. _User, Custom, etc.)
   // and resolves with false if it wasn't (eg. a join table). Rejects if deletion was impossible.
   deleteClass(className) {
-    return notImplemented();
+    return Promise.resolve().then(() => {
+      let operations = [[`DROP TABLE IF EXISTS $1:name`, [className]],
+        [`DELETE FROM "_SCHEMA" WHERE "className"=$1`, [className]]];
+      return this._client.tx(t=>t.batch(operations.map(statement=>t.none(statement[0], statement[1]))));
+    }).then(() => {
+      // resolves with false when _Join table
+      return className.indexOf('_Join:') != 0;
+    });
   }
 
   // Delete all data known to this adapter. Used for testing.
@@ -422,14 +534,9 @@ export class PostgresStorageAdapter {
     return this._client.any('SELECT * FROM "_SCHEMA"')
     .then(results => {
       let joins = results.reduce((list, schema) => {
-        Object.keys(schema.schema.fields).forEach((field) => {
-          if (schema.schema.fields[field].type === 'Relation') {
-            list.push(`_Join:${field}:${schema.className}`);
-          }
-        })
-        return list;
+        return list.concat(joinTablesForSchema(schema.schema));
       }, []);
-      const classes = ['_SCHEMA','_PushStatus','_Hooks','_GlobalConfig', ...results.map(result => result.className), ...joins];
+      const classes = ['_SCHEMA','_PushStatus','_JobStatus','_Hooks','_GlobalConfig', ...results.map(result => result.className), ...joins];
       return this._client.tx(t=>t.batch(classes.map(className=>t.none('DROP TABLE IF EXISTS $<className:name>', { className }))));
     }, error => {
       if (error.code === PostgresRelationDoesNotExistError) {
@@ -457,7 +564,36 @@ export class PostgresStorageAdapter {
 
   // Returns a Promise.
   deleteFields(className, schema, fieldNames) {
-    return notImplemented();
+    debug('deleteFields', className, fieldNames);
+    return Promise.resolve()
+    .then(() => {
+      fieldNames = fieldNames.reduce((list, fieldName) => {
+        let field = schema.fields[fieldName]
+        if (field.type !== 'Relation') {
+          list.push(fieldName);
+        }
+        delete schema.fields[fieldName];
+        return list;
+      }, []);
+
+      let values = [className, ...fieldNames];
+      let columns = fieldNames.map((name, idx) => {
+        return `$${idx+2}:name`;
+      }).join(',');
+
+      let doBatch = (t) => {
+        let batch = [
+          t.none('UPDATE "_SCHEMA" SET "schema"=$<schema> WHERE "className"=$<className>', {schema, className})
+        ];
+        if (values.length > 1) {
+          batch.push(t.none(`ALTER TABLE $1:name DROP COLUMN ${columns}`, values));
+        }
+        return batch;
+      }
+      return this._client.tx((t) => {
+        return t.batch(doBatch(t));
+      });
+    });
   }
 
   // Return a promise for all schemas known to this adapter, in Parse format. In case the
@@ -473,6 +609,7 @@ export class PostgresStorageAdapter {
   // this adapter doesn't know about the schema, return a promise that rejects with
   // undefined as the reason.
   getClass(className) {
+    debug('getClass', className);
     return this._client.any('SELECT * FROM "_SCHEMA" WHERE "className"=$<className>', { className })
     .then(result => {
       if (result.length === 1) {
@@ -491,6 +628,9 @@ export class PostgresStorageAdapter {
     let valuesArray = [];
     schema = toPostgresSchema(schema);
     let geoPoints = {};
+
+    object = handleDotFields(object);
+
     Object.keys(object).forEach(fieldName => {
       var authDataMatch = fieldName.match(/^_auth_data_([a-zA-Z0-9_]+)$/);
       if (authDataMatch) {
@@ -503,17 +643,36 @@ export class PostgresStorageAdapter {
       
       columnsArray.push(fieldName);
       if (!schema.fields[fieldName] && className === '_User') {
-        if (fieldName == '_email_verify_token') {
+        if (fieldName === '_email_verify_token' ||
+            fieldName === '_failed_login_count' ||
+            fieldName === '_perishable_token') {
           valuesArray.push(object[fieldName]);
         }
-        if (fieldName == '_email_verify_token_expires_at') {
-          valuesArray.push(object[fieldName].iso);
+
+        if (fieldName === '_email_verify_token_expires_at') {
+          if (object[fieldName]) {
+            valuesArray.push(object[fieldName].iso);
+          } else {
+            valuesArray.push(null);
+          }
+        }
+
+        if (fieldName === '_account_lockout_expires_at') {
+          if (object[fieldName]) {
+            valuesArray.push(object[fieldName].iso);
+          } else {
+            valuesArray.push(null);
+          }
         }
         return;
       }
       switch (schema.fields[fieldName].type) {
         case 'Date':
-          valuesArray.push(object[fieldName].iso);
+          if (object[fieldName]) {
+            valuesArray.push(object[fieldName].iso);
+          } else {
+            valuesArray.push(null);
+          }
           break;
         case 'Pointer':
           valuesArray.push(object[fieldName].objectId);
@@ -529,8 +688,10 @@ export class PostgresStorageAdapter {
         case 'String':
         case 'Number':
         case 'Boolean':
-        case 'File':
           valuesArray.push(object[fieldName]);
+          break;
+        case 'File':
+          valuesArray.push(object[fieldName].name);
           break;
         case 'GeoPoint':
           // pop the point and process later
@@ -539,16 +700,23 @@ export class PostgresStorageAdapter {
           break;
         default:
           throw `Type ${schema.fields[fieldName].type} not supported yet`;
-          break;
       }
     });
 
     columnsArray = columnsArray.concat(Object.keys(geoPoints));
-    let initialValues = valuesArray.map((val, index) => `$${index + 2 + columnsArray.length}${(['_rperm','_wperm'].includes(columnsArray[index])) ? '::text[]' : ''}`);
-    
+    let initialValues = valuesArray.map((val, index) => {
+      let termination = '';
+      let fieldName = columnsArray[index];
+      if (['_rperm','_wperm'].includes(fieldName)) {
+        termination = '::text[]';
+      } else if (schema.fields[fieldName] && schema.fields[fieldName].type === 'Array') {
+        termination = '::jsonb';
+      }
+      return `$${index + 2 + columnsArray.length}${termination}`;
+    });
     let geoPointsInjects = Object.keys(geoPoints).map((key, idx) => {
       let value = geoPoints[key];
-      valuesArray.push(value.latitude, value.longitude);
+      valuesArray.push(value.longitude, value.latitude);
       let l = valuesArray.length + columnsArray.length;
       return `POINT($${l}, $${l+1})`;
     });
@@ -579,7 +747,7 @@ export class PostgresStorageAdapter {
     let index = 2;
     let where = buildWhereClause({ schema, index, query })
     values.push(...where.values);
-    if (Object.keys(query).length == 0) {
+    if (Object.keys(query).length === 0) {
       where.pattern = 'TRUE';
     }
     let qs = `WITH deleted AS (DELETE FROM $1:name WHERE ${where.pattern} RETURNING *) SELECT count(*) FROM deleted`;
@@ -593,48 +761,86 @@ export class PostgresStorageAdapter {
       }
     });
   }
+  // Return value not currently well specified.
+  findOneAndUpdate(className, schema, query, update) {
+    debug('findOneAndUpdate', className, query, update);
+    return this.updateObjectsByQuery(className, schema, query, update).then((val) => val[0]);
+  }
 
   // Apply the update to all objects that match the given Parse Query.
   updateObjectsByQuery(className, schema, query, update) {
     debug('updateObjectsByQuery', className, query, update);
-    return this.findOneAndUpdate(className, schema, query, update);
-  }
-
-  // Return value not currently well specified.
-  findOneAndUpdate(className, schema, query, update) {
-    debug('findOneAndUpdate', className, query, update);
     let conditionPatterns = [];
     let updatePatterns = [];
     let values = [className]
     let index = 2;
     schema = toPostgresSchema(schema);
+
+    update = handleDotFields(update);
+    // Resolve authData first,
+    // So we don't end up with multiple key updates
     for (let fieldName in update) {
-      let fieldValue = update[fieldName];
-      var authDataMatch = fieldName.match(/^_auth_data_([a-zA-Z0-9_]+)$/);
+      let authDataMatch = fieldName.match(/^_auth_data_([a-zA-Z0-9_]+)$/);
       if (authDataMatch) {
         var provider = authDataMatch[1];
         let value = update[fieldName];
         delete update[fieldName];
-        fieldName = 'authData';
-        updatePatterns.push(`$${index}:name = json_object_set_key($${index}:name, $${index+1}::text, $${index+2}::jsonb)`);
-        values.push(fieldName, provider, value);
-        index += 3;
+        update['authData'] = update['authData'] || {};
+        update['authData'][provider] = value;
+      }
+    }
+
+    for (let fieldName in update) {
+      let fieldValue = update[fieldName];
+      if (fieldValue === null) {
+        updatePatterns.push(`$${index}:name = NULL`);
+        values.push(fieldName);
+        index += 1;
+      } else if (fieldName == 'authData') {
+        // This recursively sets the json_object
+        // Only 1 level deep
+        let generate = (jsonb, key, value) => {
+          return `json_object_set_key(COALESCE(${jsonb}, '{}'::jsonb), ${key}, ${value})::jsonb`; 
+        }
+        let lastKey = `$${index}:name`;
+        let fieldNameIndex = index;
+        index+=1;
+        values.push(fieldName);
+        let update = Object.keys(fieldValue).reduce((lastKey, key) => {
+          let str = generate(lastKey, `$${index}::text`, `$${index+1}::jsonb`)
+          index+=2;
+          let value = fieldValue[key];
+          if (value) {
+            if (value.__op === 'Delete') {
+              value = null;
+            } else {
+              value = JSON.stringify(value)
+            }
+          }
+          values.push(key, value);
+          return str;
+        }, lastKey);
+        updatePatterns.push(`$${fieldNameIndex}:name = ${update}`);
       } else if (fieldValue.__op === 'Increment') {
         updatePatterns.push(`$${index}:name = COALESCE($${index}:name, 0) + $${index + 1}`);
         values.push(fieldName, fieldValue.amount);
         index += 2;
       } else if (fieldValue.__op === 'Add') {
-        updatePatterns.push(`$${index}:name = COALESCE($${index}:name, '[]'::jsonb) || $${index + 1}`);
-        values.push(fieldName, fieldValue.objects);
+        updatePatterns.push(`$${index}:name = array_add(COALESCE($${index}:name, '[]'::jsonb), $${index + 1}::jsonb)`);
+        values.push(fieldName, JSON.stringify(fieldValue.objects));
         index += 2;
       } else if (fieldValue.__op === 'Delete') {
         updatePatterns.push(`$${index}:name = $${index + 1}`)
         values.push(fieldName, null);
         index += 2;
       } else if (fieldValue.__op === 'Remove') {
-        return Promise.reject(new Parse.Error(Parse.Error.OPERATION_FORBIDDEN, 'Postgres does not support Remove operator.'));
+        updatePatterns.push(`$${index}:name = array_remove(COALESCE($${index}:name, '[]'::jsonb), $${index + 1}::jsonb)`)
+        values.push(fieldName, JSON.stringify(fieldValue.objects));
+        index += 2;
       } else if (fieldValue.__op === 'AddUnique') {
-        return Promise.reject(new Parse.Error(Parse.Error.OPERATION_FORBIDDEN, 'Postgres does not support AddUnique operator.'));
+        updatePatterns.push(`$${index}:name = array_add_unique(COALESCE($${index}:name, '[]'::jsonb), $${index + 1}::jsonb)`);
+        values.push(fieldName, JSON.stringify(fieldValue.objects));
+        index += 2;
       } else if (fieldName === 'updatedAt') { //TODO: stop special casing this. It should check for __type === 'Date' and use .iso
         updatePatterns.push(`$${index}:name = $${index + 1}`)
         values.push(fieldName, fieldValue);
@@ -655,6 +861,14 @@ export class PostgresStorageAdapter {
         updatePatterns.push(`$${index}:name = $${index + 1}`);
         values.push(fieldName, toPostgresValue(fieldValue));
         index += 2;
+      } else if (fieldValue instanceof Date) {
+        updatePatterns.push(`$${index}:name = $${index + 1}`);
+        values.push(fieldName, fieldValue);
+        index += 2;
+      } else if (fieldValue.__type === 'File') {
+        updatePatterns.push(`$${index}:name = $${index + 1}`);
+        values.push(fieldName, toPostgresValue(fieldValue));
+        index += 2;
       } else if (fieldValue.__type === 'GeoPoint') {
         updatePatterns.push(`$${index}:name = POINT($${index + 1}, $${index + 2})`);
         values.push(fieldName, fieldValue.latitude, fieldValue.longitude);
@@ -665,13 +879,13 @@ export class PostgresStorageAdapter {
         index += 2;
       } else if (typeof fieldValue === 'object'
                     && schema.fields[fieldName]
-                    && schema.fields[fieldName].type == 'Object') {
+                    && schema.fields[fieldName].type === 'Object') {
         updatePatterns.push(`$${index}:name = $${index + 1}`);
         values.push(fieldName, fieldValue);
         index += 2;
       } else if (Array.isArray(fieldValue)
                     && schema.fields[fieldName]
-                    && schema.fields[fieldName].type == 'Array') {
+                    && schema.fields[fieldName].type === 'Array') {
         let expectedType = parseTypeToPostgresType(schema.fields[fieldName]);
         if (expectedType === 'text[]') {
           updatePatterns.push(`$${index}:name = $${index + 1}::text[]`);
@@ -691,17 +905,17 @@ export class PostgresStorageAdapter {
 
     let qs = `UPDATE $1:name SET ${updatePatterns.join(',')} WHERE ${where.pattern} RETURNING *`;
     debug('update: ', qs, values);
-    return this._client.any(qs, values) 
-    .then(val => val[0]); // TODO: This is unsafe, verification is needed, or a different query method;
+    return this._client.any(qs, values); // TODO: This is unsafe, verification is needed, or a different query method;
   }
 
   // Hopefully, we can get rid of this. It's only used for config and hooks.
   upsertOneObject(className, schema, query, update) {
     debug('upsertOneObject', {className, query, update});
-    return this.createObject(className, schema, update).catch((err) => {
+    let createValue = Object.assign({}, query, update);
+    return this.createObject(className, schema, createValue).catch((err) => {
       // ignore duplicate value errors as it's upsert
-      if (err.code == Parse.Error.DUPLICATE_VALUE) {
-        return;
+      if (err.code === Parse.Error.DUPLICATE_VALUE) {
+        return this.findOneAndUpdate(className, schema, query, update);
       }
       throw err;
     });
@@ -763,8 +977,14 @@ export class PostgresStorageAdapter {
         }
         if (object[fieldName] && schema.fields[fieldName].type === 'GeoPoint') {
           object[fieldName] = {
-            latitude: object[fieldName].x,
-            longitude: object[fieldName].y
+            latitude: object[fieldName].y,
+            longitude: object[fieldName].x
+          }
+        }
+        if (object[fieldName] && schema.fields[fieldName].type === 'File') {
+          object[fieldName] = {
+            __type: 'File',
+            name: object[fieldName]
           }
         }
       });
@@ -780,6 +1000,9 @@ export class PostgresStorageAdapter {
       }
       if (object._email_verify_token_expires_at) {
         object._email_verify_token_expires_at = { __type: 'Date', iso: object._email_verify_token_expires_at.toISOString() };
+      }
+      if (object._account_lockout_expires_at) {
+        object._account_lockout_expires_at = { __type: 'Date', iso: object._account_lockout_expires_at.toISOString() };
       }
 
       for (let fieldName in object) {
@@ -821,29 +1044,55 @@ export class PostgresStorageAdapter {
 
   // Executes a count.
   count(className, schema, query) {
+    debug('count', className, query);
     let values = [className];
     let where = buildWhereClause({ schema, query, index: 2 });
     values.push(...where.values);
 
     const wherePattern = where.pattern.length > 0 ? `WHERE ${where.pattern}` : '';
     const qs = `SELECT count(*) FROM $1:name ${wherePattern}`;
-    return this._client.one(qs, values, a => +a.count);
+    return this._client.one(qs, values, a => +a.count).catch((err) => {
+      if (err.code === PostgresRelationDoesNotExistError) {
+        return 0;
+      }
+      throw err;
+    });
   }
 
   performInitialization({ VolatileClassesSchemas }) {
     let now = new Date().getTime();
     debug('performInitialization');
     let promises = VolatileClassesSchemas.map((schema) => {
-      return this.createTable(schema.className, schema);
+      return this.createTable(schema.className, schema).catch((err) =>{
+        if (err.code === PostgresDuplicateRelationError || err.code === Parse.Error.INVALID_CLASS_NAME) {
+          return Promise.resolve();
+        }
+        throw err;
+      });
     });
-
-    return Promise.all(promises).then(() => {
-      return this._client.any(json_object_set_key).catch((err) => {
-        console.error(err);
-      })
-    }).then(() => {
+    promises = promises.concat([
+        this._client.any(json_object_set_key).catch((err) => {
+          console.error(err);
+        }),
+        this._client.any(array_add).catch((err) => {
+          console.error(err);
+        }),
+        this._client.any(array_add_unique).catch((err) => {
+          console.error(err);
+        }),
+        this._client.any(array_remove).catch((err) => {
+          console.error(err);
+        }),
+        this._client.any(array_contains_all).catch((err) => {
+          console.error(err);
+        }),
+        this._client.any(array_contains).catch((err) => {
+          console.error(err);
+        })
+      ]);
+    return Promise.all(promises).then(() => {
       debug(`initialzationDone in ${new Date().getTime() - now}`);
-    })
+    }, (err) => {});
   }
 }
 
@@ -869,6 +1118,66 @@ SELECT concat(\'{\', string_agg(to_json("key") || \':\' || "value", \',\'), \'}\
          UNION ALL\
         SELECT "key_to_set", to_json("value_to_set")::jsonb) AS "fields"\
 $function$;'
+
+const array_add = `CREATE OR REPLACE FUNCTION "array_add"(
+  "array"   jsonb,
+  "values"  jsonb
+)
+  RETURNS jsonb 
+  LANGUAGE sql 
+  IMMUTABLE 
+  STRICT 
+AS $function$ 
+  SELECT array_to_json(ARRAY(SELECT unnest(ARRAY(SELECT DISTINCT jsonb_array_elements("array")) ||  ARRAY(SELECT jsonb_array_elements("values")))))::jsonb;
+$function$;`;
+
+const array_add_unique = `CREATE OR REPLACE FUNCTION "array_add_unique"(
+  "array"   jsonb,
+  "values"  jsonb
+)
+  RETURNS jsonb 
+  LANGUAGE sql 
+  IMMUTABLE 
+  STRICT 
+AS $function$ 
+  SELECT array_to_json(ARRAY(SELECT DISTINCT unnest(ARRAY(SELECT DISTINCT jsonb_array_elements("array")) ||  ARRAY(SELECT DISTINCT jsonb_array_elements("values")))))::jsonb;
+$function$;`;
+
+const array_remove = `CREATE OR REPLACE FUNCTION "array_remove"(
+  "array"   jsonb,
+  "values"  jsonb
+)
+  RETURNS jsonb 
+  LANGUAGE sql 
+  IMMUTABLE 
+  STRICT 
+AS $function$ 
+  SELECT array_to_json(ARRAY(SELECT * FROM jsonb_array_elements("array") as elt WHERE elt NOT IN (SELECT * FROM (SELECT jsonb_array_elements("values")) AS sub)))::jsonb;
+$function$;`;
+
+const array_contains_all = `CREATE OR REPLACE FUNCTION "array_contains_all"(
+  "array"   jsonb,
+  "values"  jsonb
+)
+  RETURNS boolean 
+  LANGUAGE sql 
+  IMMUTABLE 
+  STRICT 
+AS $function$ 
+  SELECT RES.CNT = jsonb_array_length("values") FROM (SELECT COUNT(*) as CNT FROM jsonb_array_elements("array") as elt WHERE elt IN (SELECT jsonb_array_elements("values"))) as RES ;
+$function$;`;
+
+const array_contains = `CREATE OR REPLACE FUNCTION "array_contains"(
+  "array"   jsonb,
+  "values"  jsonb
+)
+  RETURNS boolean 
+  LANGUAGE sql 
+  IMMUTABLE 
+  STRICT 
+AS $function$ 
+  SELECT RES.CNT >= 1 FROM (SELECT COUNT(*) as CNT FROM jsonb_array_elements("array") as elt WHERE elt IN (SELECT jsonb_array_elements("values"))) as RES ;
+$function$;`;
 
 export default PostgresStorageAdapter;
 module.exports = PostgresStorageAdapter; // Required for tests

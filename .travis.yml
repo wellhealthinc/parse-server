@@ -16,17 +16,17 @@ env:
   - COVERAGE_OPTION='./node_modules/.bin/istanbul cover'
   matrix:
   - PARSE_SERVER_TEST_DB=postgres
-  - MONGODB_VERSION=2.6.11
   - MONGODB_VERSION=3.0.8
   - MONGODB_VERSION=3.2.6
 matrix:
-  fast_finish: true,
+  fast_finish: true
 branches:
   only:
   - master
   - /^[0-9]+.[0-9]+.[0-9]+(-.*)?$/
 cache:
   directories:
+  - node_modules
   - "$HOME/.mongodb/versions"
 after_script:
 - bash <(curl -s https://codecov.io/bash)
