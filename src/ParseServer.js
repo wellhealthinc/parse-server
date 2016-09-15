@@ -294,7 +294,10 @@ class ParseServer {
       });
     }
     if (process.env.PARSE_SERVER_ENABLE_EXPERIMENTAL_DIRECT_ACCESS === '1') {
+      console.log('PARSE_SERVER_ENABLE_EXPERIMENTAL_DIRECT_ACCESS ENABLED');
       Parse.CoreManager.setRESTController(ParseServerRESTController(appId, appRouter));
+    } else{
+        console.log('PARSE_SERVER_ENABLE_EXPERIMENTAL_DIRECT_ACCESS OFF');
     }
     return api;
   }
