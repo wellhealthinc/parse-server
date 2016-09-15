@@ -31,6 +31,7 @@ const defaultColumns = Object.freeze({
     "password":      {type:'String'},
     "email":         {type:'String'},
     "emailVerified": {type:'Boolean'},
+    "authData":      {type:'Object'}
   },
   // The additional default columns for the _Installation collection (in addition to DefaultCols)
   _Installation: {
@@ -296,6 +297,13 @@ const dbTypeMatchesObjectType = (dbType, objectType) => {
   if (dbType === objectType.type) return true;
   if (dbType.type === objectType.type) return true;
   return false;
+}
+
+const typeToString = (type) => {
+  if (type.targetClass) {
+    return `${type.type}<${type.targetClass}>`;
+  }
+  return `${type.type || type}`;
 }
 
 // Stores the entire schema of the app in a weird hybrid format somewhere between
@@ -591,7 +599,7 @@ export default class SchemaController {
         if (!dbTypeMatchesObjectType(expectedType, type)) {
           throw new Parse.Error(
             Parse.Error.INCORRECT_TYPE,
-            `schema mismatch for ${className}.${fieldName}; expected ${expectedType.type || expectedType} but got ${type.type}`
+            `schema mismatch for ${className}.${fieldName}; expected ${typeToString(expectedType)} but got ${typeToString(type)}`
           );
         }
         return this;

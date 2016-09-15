@@ -19,9 +19,6 @@ export class UsersRouter extends ClassesRouter {
   }
 
   handleGet(req) {
-    if (req.params.objectId === 'me') {
-      return this.handleMe(req);
-    }
     req.params.className = '_User';
     return super.handleGet(req);
   }
@@ -78,6 +75,9 @@ export class UsersRouter extends ClassesRouter {
     }
     if (!req.body.password) {
       throw new Parse.Error(Parse.Error.PASSWORD_MISSING, 'password is required.');
+    }
+    if (typeof req.body.username !== 'string' || typeof req.body.password !== 'string') {
+      throw new Parse.Error(Parse.Error.OBJECT_NOT_FOUND, 'Invalid username/password.');
     }
 
     let user;
@@ -190,6 +190,9 @@ export class UsersRouter extends ClassesRouter {
     if (!email) {
       throw new Parse.Error(Parse.Error.EMAIL_MISSING, "you must provide an email");
     }
+    if (typeof email !== 'string') {
+      throw new Parse.Error(Parse.Error.INVALID_EMAIL_ADDRESS, 'you must provide a valid email string');
+    }
     let userController = req.config.userController;
     return userController.sendPasswordResetEmail(email).then(token => {
        return Promise.resolve({
@@ -208,6 +211,7 @@ export class UsersRouter extends ClassesRouter {
   mountRoutes() {
     this.route('GET', '/users', req => { return this.handleFind(req); });
     this.route('POST', '/users', req => { return this.handleCreate(req); });
+    this.route('GET', '/users/me', req => { return this.handleMe(req); });
     this.route('GET', '/users/:objectId', req => { return this.handleGet(req); });
     this.route('PUT', '/users/:objectId', req => { return this.handleUpdate(req); });
     this.route('DELETE', '/users/:objectId', req => { return this.handleDelete(req); });
